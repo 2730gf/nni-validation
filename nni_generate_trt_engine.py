@@ -1,9 +1,8 @@
 """
 Usage:
-    python nni_qat_practice.py
+    python nni_generate_trt_engine.py
 Ps:
-    这个代码使用的是nni的QAT量化代码
-    
+    这个代码用来生成tensor engine
 """
 from shutil import disk_usage
 import time
@@ -11,11 +10,9 @@ import logging
 
 import argparse
 import os
-os.chdir("/home/gongfu/workspace/baidu/personal-code/qat-validation")
 
 from copy import deepcopy
-import sys
-from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,45 +20,12 @@ from torch.optim.lr_scheduler import StepLR, MultiStepLR
 from torchvision import datasets, transforms
 import torchvision.models as models
 
-from nni.algorithms.compression.pytorch.quantization import QAT_Quantizer
-from nni.compression.pytorch.utils.counter import count_flops_params
-from nni.compression.pytorch.quantization.settings import set_quant_scheme_dtype
+from quantization_speedup import ModelSpeedupTensorRT 
 
 import time
 import pdb
 from absl import logging
 logging.set_verbosity(logging.WARNING) 
-
-
-class NaiveModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = torch.nn.Conv2d(3, 5, 3, 1)
-        self.conv2 = torch.nn.Conv2d(5, 5, 3,1)
-        
-        self.relu1 = torch.nn.ReLU6()
-        self.relu2 = torch.nn.ReLU6()
-        
-        self.bn1 = torch.nn.BatchNorm2d(5)
-        self.bn2 = torch.nn.BatchNorm2d(5)
-        
-        self.max_pool1 = torch.nn.MaxPool2d(2, 2)
-        self.max_pool2 = torch.nn.MaxPool2d(2, 2)
-        
-        self.sf = nn.Softmax(dim=1)
-        self.fc = nn.Linear(180, 10)
-        
-    def forward(self,x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu1(x)
-        x = self.max_pool1(x)
-        x = self.relu2(self.bn2(self.conv2(x)))
-        x = self.max_pool2(x)
-        x = x.view(x.size(0), -1)
-        x = self.sf(x)
-        x = self.fc(x)
-        return x
 
     
 def save_qat_onnx(model, dummy_input, save_path):
@@ -115,11 +79,12 @@ def get_model_optimizer(args, device):
         model.fc = torch.nn.Linear(2048, 10)
     model.to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-    scheduler = StepLR(optimizer, step_size=1, gamma=0.7)
+    scheduler = MultiStepLR(
+                optimizer, milestones=[int(args.train_epochs * 0.5), int(args.train_epochs * 0.75)], gamma=0.1)
 
     if os.path.exists(args.pretrained_model_dir):
         print("load from state_dict: {}".format(args.pretrained_model_dir))
-        model.load_state_dict(torch.load(args.pretrained_model_dir,map_location=device), strict=False)
+        model.load_state_dict(torch.load(args.pretrained_model_dir, map_location=device), strict=False)
 
     return model, optimizer, scheduler
 
@@ -158,6 +123,21 @@ def test(model, device, criterion, test_loader):
         test_loss, acc))
     return acc
 
+def test_trt(engine, test_loader):
+    test_loss = 0
+    correct = 0
+    time_elasped = 0
+    for data, target in test_loader:
+        output, time = engine.inference(data)
+        test_loss += F.nll_loss(output, target, reduction='sum').item()
+        pred = output.argmax(dim=1, keepdim=True)
+        correct += pred.eq(target.view_as(pred)).sum().item()
+        time_elasped += time
+    test_loss /= len(test_loader.dataset)
+
+    print('Loss: {}  Accuracy: {}%'.format(
+        test_loss, 100 * correct / len(test_loader.dataset)))
+    print("Inference elapsed_time (whole dataset): {}s".format(time_elasped))
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,73 +146,22 @@ def main(args):
     # prepare model and data
     train_loader, test_loader, criterion = get_data('./data', args.batch_size, args.test_batch_size)
     model, optimizer, scheduler = get_model_optimizer(args, device) 
-    print(model)
-    # pdb.set_trace()
     
-    if args.qat:
-        # SUPPORTED_OPS = ['Conv2d', 'Linear', 'ReLU', 'ReLU6']
-        config_list = [{
-        'quant_types': ['weight', 'input', 'output'],
-        'quant_bits': {'weight': 8, 'input': 8, 'output': 8 },
-            'op_names': ['conv1', 'layer1.0.conv1', 'layer1.0.conv2', 'layer1.1.conv1', 'layer1.1.conv2', 
-            'layer2.0.conv1', 'layer2.0.conv2', 'layer2.0.downsample.0', 'layer2.1.conv1', 'layer2.1.conv2', 
-            'layer3.0.conv1', 'layer3.0.conv2', 'layer3.0.downsample.0', 'layer3.1.conv1', 'layer3.1.conv2', 
-            'layer4.0.conv1', 'layer4.0.conv2', 'layer4.0.downsample.0', 'layer4.1.conv1', 'layer4.1.conv2']
-        }, {
-            'quant_types': ['output'],
-            'quant_bits': {'output': 8, },
-            'op_names': ['relu', 'layer1.0.relu', 'layer1.1.relu', 'layer2.0.relu', 'layer2.1.relu',
-            'layer3.0.relu', 'layer3.1.relu', 'layer4.0.relu', 'layer4.1.relu']
-        }, {
-            'quant_types': ['output', 'weight', 'input'],
-            'quant_bits': {'output': 8, 'weight': 8, 'input': 8},
-            'op_names': ['fc'],
-        }]
+    pth_acc = test(model, device, criterion, test_loader)
 
-        # 选择是否per_channel来做量化
-        set_quant_scheme_dtype('weight', 'per_channel_symmetric', 'int')
-        set_quant_scheme_dtype('output', 'per_tensor_symmetric', 'int')
-        set_quant_scheme_dtype('input', 'per_tensor_symmetric', 'int')
-
-        dummy_input = torch.randn(5,3,32,32).to(device)
-        # count_flops_params(model,dummy_input)
-        # pdb.set_trace()
-        quantizer = QAT_Quantizer(model, config_list, optimizer, dummy_input=dummy_input)
-        quantizer.compress()
-
-    train_time  =time.time()
-    best_acc = 0
+    calibration_config = torch.load(args.calib_path, map_location="cpu")
+    # Model Speedup
+    batch_size = 32
+    input_shape = (batch_size, 3, 32, 32)
+    engine = ModelSpeedupTensorRT(model, input_shape, config=calibration_config, batchsize=32, calibration_cache = "./calib/model.calib")
+    engine.compress()
+    engine.export_quantized_model("./exp/resnet18.trt")
     
-    if args.qat:
-        save_path = os.path.join(args.experiment_data_dir, "{}_nniqat_finetune.pth".format(args.model))
-    else:
-        save_path = os.path.join(args.experiment_data_dir, "{}_best.pth".format(args.model))
+    # 测试trt精度
+    test_trt(engine, test_loader)
+    print("pth acc: {}".format(pth_acc))
     
-    test(model, device, criterion, test_loader)
-    for epoch in range(args.train_epochs):
-        print('# Epoch {} #'.format(epoch))
-        train(model, device, train_loader, criterion, optimizer, epoch)
-        scheduler.step()
-        acc = test(model, device, criterion, test_loader)
-        # pdb.set_trace()
-        if acc > best_acc:
-            if not args.qat:
-                torch.save(model.state_dict(), save_path)
-                best_acc = acc
-            else:
-                state_dict = model.state_dict()
-                best_acc = acc
     
-    if args.qat:            
-        model.load_state_dict(state_dict)
-        calibration_path = "./exp/{}_nni_calibration.pth".format(args.model)
-        pdb.set_trace()
-        calibration_config = quantizer.export_model(save_path, calibration_path)# , onnx_path, input_shape, device)
-        # print("Generated calibration config is: ", calibration_config) 
-        pdb.set_trace()
-
-    train_time = time.time() - train_time
-    print("train_time: {:.4f}s".format(train_time))    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="qat practice")
@@ -242,6 +171,7 @@ if __name__ == '__main__':
     
     parser.add_argument("--pretrained_model_dir", default="./exp/res18_best.pth", type=str)
     parser.add_argument("--experiment_data_dir", default="./exp", type=str)
+    parser.add_argument("--calib_path", default="./exp/res18_nni_calibration.pth", type=str)
     
     parser.add_argument("--train_epochs", default=1, type=int)
     parser.add_argument("--lr", default=0.01, type=float)
@@ -266,6 +196,6 @@ if __name__ == '__main__':
 
     # args.test_only = False
     args.qat = True
-    
-    
+    args.pretrained_model_dir = "./exp/res18_nniqat_finetune.pth"
+
     main(args)

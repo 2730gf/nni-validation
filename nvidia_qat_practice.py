@@ -3,7 +3,8 @@ Usage:
     python qat_practice.py
 Ps:
     这个代码使用的是nvidia提供的pytorch_quantization
-    
+    个人觉得，缺点:在于没有融合BN层，所以导致精度还可以进一步提升
+    优点:添加量化的节点非常方便
 """
 import time
 import logging
@@ -218,7 +219,6 @@ def main(args):
         with torch.no_grad():
             init_calib_from_data_loader(model, train_loader)
         save_path = os.path.join(args.experiment_data_dir, "{}_nvqat_finetune.pth".format(args.model))
-    
     
     best_acc = 0       
     train_time  =time.time()

@@ -2,7 +2,10 @@ build
 exp/*
 data/*
 
-
+*.trt
+*.pth
+*.txt
+*.onnx
 output
 models
 val
