@@ -232,8 +232,6 @@ def build_engine(model_file, config=None, extra_layer_bits=32, strict_datatype=F
                     out_tensor.dynamic_range = (tracked_min_output, tracked_max_output)
                     
                     model_calib[out_tensor.name] = (tracked_max_output - tracked_min_output)/255
-        print(model_calib)
-        torch.save(model_calib, "model_calib.pth")
 
         # Build engine and do int8 calibration.
         if trt_version == TRT8:
