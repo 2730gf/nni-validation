@@ -26,7 +26,7 @@ import time
 import pdb
 from absl import logging
 logging.set_verbosity(logging.WARNING) 
-
+from models.cifar10.resnet import ResNet18, ResNet50, ResNet101
     
 def save_qat_onnx(model, dummy_input, save_path):
 
@@ -69,14 +69,11 @@ def get_data(data_dir, batch_size, test_batch_size):
 
 def get_model_optimizer(args, device):
     if args.model == "res18":
-        model = models.resnet18(pretrained=True)
-        model.fc = torch.nn.Linear(512,10)
+        model = ResNet18()
     elif args.model == 'res101':
-        model = models.resnet101(pretrained=True)
-        model.fc = torch.nn.Linear(2048, 10)
+        model = ResNet101()
     elif args.model == 'res50':
-        model = models.resnet50(pretrained=True)
-        model.fc = torch.nn.Linear(2048, 10)
+        model = ResNet50()
     model.to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     scheduler = MultiStepLR(
@@ -148,7 +145,6 @@ def main(args):
     model, optimizer, scheduler = get_model_optimizer(args, device) 
     
     pth_acc = test(model, device, criterion, test_loader)
-
     calibration_config = torch.load(args.calib_path, map_location="cpu")
     # Model Speedup
     batch_size = 32
@@ -169,7 +165,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', default="res18", type=str,
         choices=["res18", "res50", "res101",])    
     
-    parser.add_argument("--pretrained_model_dir", default="./exp/res18_best.pth", type=str)
+    parser.add_argument("--pretrained_model_dir", default="./exp/pretrain_cifar10_resnet18.pth", type=str)
     parser.add_argument("--experiment_data_dir", default="./exp", type=str)
     parser.add_argument("--calib_path", default="./exp/res18_nni_calibration.pth", type=str)
     

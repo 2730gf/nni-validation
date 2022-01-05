@@ -11,7 +11,6 @@ import logging
 
 import argparse
 import os
-os.chdir("/home/gongfu/workspace/baidu/personal-code/qat-validation")
 
 from copy import deepcopy
 import sys
@@ -23,7 +22,7 @@ from torch.optim.lr_scheduler import StepLR, MultiStepLR
 from torchvision import datasets, transforms
 import torchvision.models as models
 
-from nni.algorithms.compression.pytorch.quantization import QAT_Quantizer
+from nni.algorithms.compression.pytorch.quantization import QAT_Quantizer, LsqQuantizer, DoReFaQuantizer
 from nni.compression.pytorch.utils.counter import count_flops_params
 from nni.compression.pytorch.quantization.settings import set_quant_scheme_dtype
 
@@ -32,6 +31,8 @@ import pdb
 from absl import logging
 logging.set_verbosity(logging.WARNING) 
 
+from models.cifar10.resnet import ResNet101, ResNet18, ResNet50
+from utils.get_op_names import get_op_names
 
 class NaiveModel(torch.nn.Module):
     def __init__(self):
@@ -105,22 +106,18 @@ def get_data(data_dir, batch_size, test_batch_size):
 
 def get_model_optimizer(args, device):
     if args.model == "res18":
-        model = models.resnet18(pretrained=True)
-        model.fc = torch.nn.Linear(512,10)
+        model = ResNet18()
     elif args.model == 'res101':
-        model = models.resnet101(pretrained=True)
-        model.fc = torch.nn.Linear(2048, 10)
+        model = ResNet101()
     elif args.model == 'res50':
-        model = models.resnet50(pretrained=True)
-        model.fc = torch.nn.Linear(2048, 10)
+        model = ResNet50()
     model.to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=5e-4)
     scheduler = StepLR(optimizer, step_size=1, gamma=0.7)
 
     if os.path.exists(args.pretrained_model_dir):
         print("load from state_dict: {}".format(args.pretrained_model_dir))
-        model.load_state_dict(torch.load(args.pretrained_model_dir,map_location=device), strict=False)
-
+        model.load_state_dict(torch.load(args.pretrained_model_dir,map_location=device), strict=False) 
     return model, optimizer, scheduler
 
 def train(model, device, train_loader, criterion, optimizer, epoch):
@@ -130,7 +127,6 @@ def train(model, device, train_loader, criterion, optimizer, epoch):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
-
         loss = criterion(output, target)
         loss.backward()
         optimizer.step()
@@ -166,38 +162,34 @@ def main(args):
     # prepare model and data
     train_loader, test_loader, criterion = get_data('./data', args.batch_size, args.test_batch_size)
     model, optimizer, scheduler = get_model_optimizer(args, device) 
-    print(model)
     # pdb.set_trace()
     
+    op_dict = get_op_names(model)
+    print(op_dict)
+    test(model, device, criterion, test_loader)
     if args.qat:
         # SUPPORTED_OPS = ['Conv2d', 'Linear', 'ReLU', 'ReLU6']
         config_list = [{
-        'quant_types': ['weight', 'input', 'output'],
-        'quant_bits': {'weight': 8, 'input': 8, 'output': 8 },
-            'op_names': ['conv1', 'layer1.0.conv1', 'layer1.0.conv2', 'layer1.1.conv1', 'layer1.1.conv2', 
-            'layer2.0.conv1', 'layer2.0.conv2', 'layer2.0.downsample.0', 'layer2.1.conv1', 'layer2.1.conv2', 
-            'layer3.0.conv1', 'layer3.0.conv2', 'layer3.0.downsample.0', 'layer3.1.conv1', 'layer3.1.conv2', 
-            'layer4.0.conv1', 'layer4.0.conv2', 'layer4.0.downsample.0', 'layer4.1.conv1', 'layer4.1.conv2']
+        'quant_types': ['weight', 'input'],
+        'quant_bits': {'weight': 8, 'input': 8,},
+            'op_names': op_dict['conv2d']
         }, {
             'quant_types': ['output'],
             'quant_bits': {'output': 8, },
-            'op_names': ['relu', 'layer1.0.relu', 'layer1.1.relu', 'layer2.0.relu', 'layer2.1.relu',
-            'layer3.0.relu', 'layer3.1.relu', 'layer4.0.relu', 'layer4.1.relu']
+            'op_names': op_dict['relu']
         }, {
             'quant_types': ['output', 'weight', 'input'],
             'quant_bits': {'output': 8, 'weight': 8, 'input': 8},
-            'op_names': ['fc'],
+            'op_names': op_dict['fc'],
         }]
-
         # 选择是否per_channel来做量化
         set_quant_scheme_dtype('weight', 'per_channel_symmetric', 'int')
         set_quant_scheme_dtype('output', 'per_tensor_symmetric', 'int')
         set_quant_scheme_dtype('input', 'per_tensor_symmetric', 'int')
 
-        dummy_input = torch.randn(5,3,32,32).to(device)
-        # count_flops_params(model,dummy_input)
-        # pdb.set_trace()
+        dummy_input = torch.randn(3,3,32,32).to(device)
         quantizer = QAT_Quantizer(model, config_list, optimizer, dummy_input=dummy_input)
+        # quantizer = LsqQuantizer(model, config_list, optimizer, dummy_input=dummy_input)
         quantizer.compress()
 
     train_time  =time.time()
@@ -209,6 +201,7 @@ def main(args):
         save_path = os.path.join(args.experiment_data_dir, "{}_best.pth".format(args.model))
     
     test(model, device, criterion, test_loader)
+    pdb.set_trace()
     for epoch in range(args.train_epochs):
         print('# Epoch {} #'.format(epoch))
         train(model, device, train_loader, criterion, optimizer, epoch)
@@ -227,10 +220,10 @@ def main(args):
         model.load_state_dict(state_dict)
         calibration_path = "./exp/{}_nni_calibration.pth".format(args.model)
         pdb.set_trace()
-        calibration_config = quantizer.export_model(save_path, calibration_path)# , onnx_path, input_shape, device)
+        calibration_config = quantizer.export_model(save_path, calibration_path) # , onnx_path, input_shape, device)
         # print("Generated calibration config is: ", calibration_config) 
         pdb.set_trace()
-
+    acc = test(model, device, criterion, test_loader)
     train_time = time.time() - train_time
     print("train_time: {:.4f}s".format(train_time))    
 
@@ -240,7 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', default="res18", type=str,
         choices=["res18", "res50", "res101",])    
     
-    parser.add_argument("--pretrained_model_dir", default="./exp/res18_best.pth", type=str)
+    parser.add_argument("--pretrained_model_dir", default="./exp/pretrain_cifar10_resnet18.pth", type=str)
     parser.add_argument("--experiment_data_dir", default="./exp", type=str)
     
     parser.add_argument("--train_epochs", default=1, type=int)
@@ -255,7 +248,7 @@ if __name__ == '__main__':
 
     # Debug TODO
     # args.model = "res18"
-    # args.pretrained_model_dir = "./exp/res18_best.pth"
+    # args.pretrained_model_dir = "./exp/pretrain_cifar10_resnet18.pth"
     # args.experiment_data_dir = "./exp"
     
     # args.train_epochs = 120

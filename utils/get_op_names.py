@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.nn.modules import instancenorm
 from torch.nn.modules.activation import ReLU6
 
-def get_op_name(model):
+def get_op_names(model):
     op_dict = DefaultDict(list)
     for name, module in model.named_modules():
         if isinstance(module, nn.Conv2d):
@@ -20,6 +20,6 @@ def get_op_name(model):
 
 if __name__ == '__main__':
     model = models.resnet18()
-    op_dict = get_op_name(model)
+    op_dict = get_op_names(model)
     
     print(op_dict.values())

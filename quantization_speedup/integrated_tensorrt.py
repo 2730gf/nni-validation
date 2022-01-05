@@ -16,6 +16,7 @@ from .backend import BaseModelSpeedup
 TRT8 = 8
 TRT7 = 7
 TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+# TRT_LOGGER = trt.Logger()
 logger = logging.getLogger(__name__)
 
 class CalibrateType:
