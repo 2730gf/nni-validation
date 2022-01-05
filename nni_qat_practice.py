@@ -170,17 +170,13 @@ def main(args):
     if args.qat:
         # SUPPORTED_OPS = ['Conv2d', 'Linear', 'ReLU', 'ReLU6']
         config_list = [{
-        'quant_types': ['weight', 'input'],
-        'quant_bits': {'weight': 8, 'input': 8,},
-            'op_names': op_dict['conv2d']
-        }, {
-            'quant_types': ['output'],
-            'quant_bits': {'output': 8, },
-            'op_names': op_dict['relu']
+            'quant_types': ['weight', 'input'],
+            'quant_bits': {'weight': 8, 'input': 8,},
+            'op_types': ['Conv2d']
         }, {
             'quant_types': ['output', 'weight', 'input'],
             'quant_bits': {'output': 8, 'weight': 8, 'input': 8},
-            'op_names': op_dict['fc'],
+            'op_types': ['Linear']
         }]
         # 选择是否per_channel来做量化
         set_quant_scheme_dtype('weight', 'per_channel_symmetric', 'int')
